@@ -1,0 +1,14 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Preview and temporary migration files
+*.preview.yml
+*.csv
+
+# Environment variables
+.env
+.venv/
+env/
+venv/

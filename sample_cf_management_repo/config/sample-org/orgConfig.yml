@@ -1,0 +1,27 @@
+# Sample cf-management orgConfig.yml
+org: sample-org
+enable-user-org-role: true
+enable-org-manager: true
+enable-org-auditor: true
+enable-billing-manager: true
+
+manager:
+  users:
+    - jsmith
+    - adeveloper
+  ldap_users: []
+  saml_users: []
+  ldap_groups:
+    - CN=Tanzu-Managers,OU=Groups,DC=corp,DC=example,DC=com
+  saml_groups: []
+
+auditor:
+  users:
+    - oldemployee
+  ldap_users: []
+  saml_users: []
+
+billing-manager:
+  users: []
+  ldap_users: []
+  saml_users: []
