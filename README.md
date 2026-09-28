@@ -79,10 +79,14 @@ The migration scripts require an App Registration in Microsoft Entra with **Appl
 
 ### Features
 * Recursively scans your `cf-management` Git repository.
-* Translates usernames across all role blocks (`developer`, `manager`, `auditor`, `billing-manager`, `supporter`).
-* Moves mapped users from `users` / `ldap_users` to `saml_users`.
+* Automatically recognizes all role blocks (`space-developer`, `space-manager`, `space-auditor`, `space-supporter`, `org-manager`, `org-auditor`, `billing-manager`, etc.).
+* Scans all candidate user lists: **`users`**, **`ldap_users`**, and **`saml_users`**.
+* **Zero Access Loss Guarantee**: Translates mapped users to their Entra ID email format, and **maintains unmapped users** in `saml_users` so nobody is accidentally locked out.
+* Cleans up legacy `users:` and `ldap_users:` fields once consolidated into `saml_users:`.
+* **Automatic Backups**: Generates `.bak` backup copies of original files before in-place modification in `--live` mode.
 * Generates side-by-side preview files (`.preview.yml`) in Dry-Run mode.
-* Exports audit CSV reports of all changes and unmapped accounts.
+* Built-in diagnostic inspection tools (`--dump-users`, `--search-user`).
+* Exports audit CSV reports (`yaml_mapped_users.csv` and `yaml_unmapped_users.csv`).
 
 ### Usage
 
@@ -92,15 +96,23 @@ export ENTRA_TENANT_ID="<YOUR_TENANT_ID>"
 export ENTRA_CLIENT_ID="<YOUR_CLIENT_ID>"
 export ENTRA_CLIENT_SECRET="<YOUR_CLIENT_SECRET>"
 
-# 2. Run in Dry-Run Preview Mode
+# 2. Run in Dry-Run Preview Mode (Generates .preview.yml files & CSV reports)
 python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config
 
 # 3. Review the preview files and CSV reports
-cat /path/to/cf-management-config/org/space/spaceConfig.yml.preview.yml
-column -t -s, yaml_migration_plan.csv
+cat /path/to/cf-management-config/config/org/space/spaceConfig.yml.preview.yml
+column -t -s, yaml_mapped_users.csv
+column -t -s, yaml_unmapped_users.csv
 
-# 4. Apply In-Place Live
+# 4. Apply In-Place Live (Creates .bak backups automatically)
 python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config --live
+
+# 5. Diagnostic / Verification Commands (Optional)
+# Dump all Entra users to JSON/CSV and print attribute breakdown
+python3 migrate_cf_management_yaml.py --dump-only
+
+# Search specific user attributes in Microsoft Graph
+python3 migrate_cf_management_yaml.py --search-user "jsmith" --dump-only
 ```
 
 ---
@@ -156,30 +168,34 @@ cf login -a https://api.sys.example.com
 
 Both tools generate standardized CSV reports for compliance and auditing:
 
-### `migration_plan.csv`
-| type | ldap_user | entra_user | org | space | role | command |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Space** | `jsmith` | `john.smith@company.com` | `production-org` | `payments-space` | `SpaceDeveloper` | `cf set-space-role ...` |
-| **Org** | `adeveloper` | `alice.dev@company.com` | `production-org` | `-` | `OrgManager` | `cf set-org-role ...` |
+### `yaml_mapped_users.csv` / `migration_plan.csv`
+| file | role | original_user | entra_user |
+| :--- | :--- | :--- | :--- |
+| `config/sample-org/dev-space/spaceConfig.yml` | `space-developer` | `jsmith` | `jsmith@company.com` |
+| `config/sample-org/orgConfig.yml` | `org-manager` | `adeveloper` | `alice.dev@company.com` |
 
-### `unmapped_users.csv`
-Identifies orphaned accounts (e.g., users who left the company and exist in legacy LDAP but no longer exist in Entra ID):
-| file / user | role | ldap_user |
+### `yaml_unmapped_users.csv` / `unmapped_ldap_users.csv`
+Identifies orphaned accounts (e.g., users who left the company or exist only in legacy directories):
+| file | role | unmapped_user |
 | :--- | :--- | :--- |
-| `dev-space/spaceConfig.yml` | `auditor` | `legacy_contractor` |
+| `config/sample-org/dev-space/spaceConfig.yml` | `space-auditor` | `oldemployee` |
 
 ---
 
-## 💡 Identity Matching Logic
+## 💡 Identity Matching Rules & Logic
 
-The tools use a multi-tier matching strategy:
+The tools use a multi-tier matching strategy to map legacy usernames to modern Entra ID identities:
 
-1. **Primary Match (Enterprise Sync)**:
-   * Matches `onPremisesSamAccountName` from Microsoft Graph directly against the LDAP username.
-2. **Fallback Match (Cloud / Lab Accounts)**:
-   * Matches against the UserPrincipalName / Email prefix (e.g. `jsmith` from `jsmith@company.com`).
-3. **Guest / External Accounts**:
-   * Normalizes Azure AD guest accounts (e.g. `external_user#EXT#@domain.com` ➡️ `external_user`).
+1. **Tier 1: On-Premises sAMAccountName (`onPremisesSamAccountName`)**:
+   * Exact match against Windows Active Directory usernames synced to Entra ID via Azure AD Connect / Entra Connect.
+2. **Tier 2: Mail Nickname (`mailNickname`)**:
+   * Matches against the user's Exchange alias / nickname in Entra ID.
+3. **Tier 3: Email Address & Prefix (`mail`)**:
+   * Matches against both the full primary email address and the username prefix before the `@` sign.
+4. **Tier 4: UserPrincipalName & Prefix (`userPrincipalName`)**:
+   * Matches against the full UPN and the prefix before `@`.
+5. **Guest & External Accounts**:
+   * Automatically strips and normalizes guest accounts (e.g. `external_user_company#EXT#@domain.onmicrosoft.com` ➡️ `external_user`).
 
 ---
 
