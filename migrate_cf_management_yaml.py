@@ -67,7 +67,39 @@ def build_entra_lookup_map(tenant_id, client_id, client_secret):
             user_map[prefix] = target_id
             user_map[clean_prefix] = target_id
 
-    return user_map
+    return user_map, users
+
+def dump_entra_users_report(users, json_file="entra_users_dump.json", csv_file="entra_users_dump.csv"):
+    with open(json_file, "w") as f:
+        json.dump(users, f, indent=2)
+
+    with open(csv_file, "w", newline="") as f:
+        fieldnames = ["displayName", "userPrincipalName", "onPremisesSamAccountName", "mail", "mailNickname", "id"]
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(users)
+
+    sam_count = sum(1 for u in users if u.get("onPremisesSamAccountName"))
+    mail_count = sum(1 for u in users if u.get("mail"))
+    upn_count = sum(1 for u in users if u.get("userPrincipalName"))
+
+    print("\n" + "=" * 70)
+    print("📋 Entra Users Attribute Breakdown:")
+    print(f"  - Total Entra Users Fetched: {len(users)}")
+    print(f"  - Users with onPremisesSamAccountName: {sam_count}")
+    print(f"  - Users with mail: {mail_count}")
+    print(f"  - Users with userPrincipalName: {upn_count}")
+    print(f"  - Full JSON dump saved to: '{json_file}'")
+    print(f"  - CSV dump saved to: '{csv_file}'")
+    print("=" * 70)
+
+    print("\n🔍 Sample User Properties (First 5):")
+    for i, u in enumerate(users[:5], 1):
+        print(f"\n  [{i}] DisplayName: {u.get('displayName')}")
+        print(f"      userPrincipalName:        {u.get('userPrincipalName')}")
+        print(f"      onPremisesSamAccountName: {u.get('onPremisesSamAccountName')}")
+        print(f"      mail:                     {u.get('mail')}")
+        print(f"      mailNickname:             {u.get('mailNickname')}")
 
 def process_yaml_file(file_path, user_map, dry_run=True):
     with open(file_path, "r") as f:
@@ -135,6 +167,9 @@ def main():
     parser = argparse.ArgumentParser(description="Transform cf-management YAML configs from LDAP to Entra SAML.")
     parser.add_argument("--dir", default="./sample_cf_management_repo", help="Path to cf-management config directory (default: ./sample_cf_management_repo)")
     parser.add_argument("--live", action="store_true", help="Modify YAML files in-place (default is Dry-Run)")
+    parser.add_argument("--dump-users", action="store_true", help="Export all fetched Entra users to entra_users_dump.json & .csv with sample prints")
+    parser.add_argument("--dump-only", action="store_true", help="Only dump/search Entra users without running YAML transformation")
+    parser.add_argument("--search-user", help="Search and display raw Entra ID attributes for a specific user")
     parser.add_argument("--tenant-id", default=os.environ.get("ENTRA_TENANT_ID"), help="Microsoft Entra Tenant ID (or env ENTRA_TENANT_ID)")
     parser.add_argument("--client-id", default=os.environ.get("ENTRA_CLIENT_ID"), help="App Registration Client ID (or env ENTRA_CLIENT_ID)")
     parser.add_argument("--client-secret", default=os.environ.get("ENTRA_CLIENT_SECRET"), help="App Registration Client Secret (or env ENTRA_CLIENT_SECRET)")
@@ -152,18 +187,35 @@ def main():
 
     print("=" * 70)
     print("  🚀 cf-management YAML Config Transformer (LDAP ➡️ Entra ID SAML)")
-    print(f"  Mode: {'DRY RUN (Generates .preview.yml files)' if dry_run else 'LIVE IN-PLACE MODIFICATION'}")
-    print(f"  Target Directory: {args.dir}")
+    if not args.dump_only:
+        print(f"  Mode: {'DRY RUN (Generates .preview.yml files)' if dry_run else 'LIVE IN-PLACE MODIFICATION'}")
+        print(f"  Target Directory: {args.dir}")
     print("=" * 70)
 
     # 1. Fetch Entra Users
     print("\n[1/3] Fetching users from Microsoft Graph...")
     try:
-        user_map = build_entra_lookup_map(args.tenant_id, args.client_id, args.client_secret)
-        print(f"  -> Successfully indexed {len(user_map)} Entra user lookup keys.")
+        user_map, raw_users = build_entra_lookup_map(args.tenant_id, args.client_id, args.client_secret)
+        print(f"  -> Successfully fetched {len(raw_users)} users ({len(user_map)} lookup keys indexed).")
     except Exception as e:
         print(f"  ❌ Error querying Microsoft Graph: {e}")
         sys.exit(1)
+
+    if args.dump_users or args.dump_only:
+        dump_entra_users_report(raw_users)
+
+    if args.search_user:
+        query = args.search_user.lower().strip()
+        matches = [u for u in raw_users if query in json.dumps(u).lower()]
+        print("\n" + "=" * 70)
+        print(f"🔎 Search results for '{args.search_user}' ({len(matches)} match{'es' if len(matches) != 1 else ''}):")
+        for m in matches:
+            print(json.dumps(m, indent=2))
+        print("=" * 70)
+
+    if args.dump_only:
+        print("\n🏁 Dump complete. Exiting without modifying YAML files.")
+        return
 
     # 2. Find YAML Configs
     print("\n[2/3] Scanning cf-management YAML configuration files...")
