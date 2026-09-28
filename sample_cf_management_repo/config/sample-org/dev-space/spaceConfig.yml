@@ -1,12 +1,5 @@
-# Sample cf-management spaceConfig.yml
-org: sample-org
 space: dev-space
-enable-space-developer: true
-enable-space-manager: true
-enable-space-auditor: true
-enable-space-supporter: true
-
-developer:
+space-developer:
   users:
     - jsmith
     - adeveloper
@@ -16,19 +9,19 @@ developer:
     - CN=Tanzu-Devs,OU=Groups,DC=corp,DC=example,DC=com
   saml_groups: []
 
-manager:
+space-manager:
   users:
     - adeveloper
   ldap_users: []
   saml_users: []
 
-auditor:
+space-auditor:
   users:
     - oldemployee
   ldap_users: []
   saml_users: []
 
-supporter:
+space-supporter:
   users: []
   ldap_users: []
   saml_users: []

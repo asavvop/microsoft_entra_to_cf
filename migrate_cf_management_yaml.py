@@ -77,14 +77,12 @@ def process_yaml_file(file_path, user_map, dry_run=True):
             print(f"  ❌ Error parsing YAML file {file_path}: {e}")
             return [], []
 
-    roles = ["developer", "manager", "auditor", "billing-manager", "supporter"]
     file_migrations = []
     file_unmapped = []
     modified = False
 
-    for role in roles:
-        if role in content and isinstance(content[role], dict):
-            role_block = content[role]
+    for role, role_block in content.items():
+        if isinstance(role_block, dict) and any(field in role_block for field in ("users", "ldap_users", "saml_users")):
             legacy_users = role_block.get("users", []) or []
             ldap_users = role_block.get("ldap_users", []) or []
             saml_users = role_block.get("saml_users", []) or []
