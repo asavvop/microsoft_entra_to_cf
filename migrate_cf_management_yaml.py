@@ -26,14 +26,26 @@ def get_graph_token(tenant_id, client_id, client_secret):
         "scope": "https://graph.microsoft.com/.default"
     }).encode("utf-8")
     req = urllib.request.Request(url, data=data)
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))["access_token"]
 
 def get_entra_users(token):
-    url = "https://graph.microsoft.com/v1.0/users?$select=id,displayName,userPrincipalName,mail,onPremisesSamAccountName,mailNickname"
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read().decode("utf-8")).get("value", [])
+    all_users = []
+    url = "https://graph.microsoft.com/v1.0/users?$top=999&$select=id,displayName,userPrincipalName,mail,onPremisesSamAccountName,mailNickname"
+    page = 1
+    
+    while url:
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            batch = data.get("value", [])
+            all_users.extend(batch)
+            url = data.get("@odata.nextLink")
+            if url:
+                page += 1
+                print(f"    ... fetched page {page} ({len(all_users)} total users so far)")
+                
+    return all_users
 
 def build_entra_lookup_map(tenant_id, client_id, client_secret):
     token = get_graph_token(tenant_id, client_id, client_secret)
