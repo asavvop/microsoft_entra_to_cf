@@ -36,23 +36,40 @@ try {
         Connect-MgGraph -Scopes "User.Read.All" -NoWelcome
     }
 
-    $allEntraUsers = Get-MgUser -All -Property DisplayName, UserPrincipalName, Mail, OnPremisesSamAccountName
+    $allEntraUsers = Get-MgUser -All -Property DisplayName, UserPrincipalName, Mail, OnPremisesSamAccountName, MailNickname
     
     $userMap = @{}
     foreach ($u in $allEntraUsers) {
         $targetIdentity = if ($EntraIdentityType -eq "Email" -and $u.Mail) { $u.Mail } else { $u.UserPrincipalName }
+        if (-not $targetIdentity) { continue }
 
+        # 1. On-Premises sAMAccountName
         if ($u.OnPremisesSamAccountName) {
-            $ldapKey = $u.OnPremisesSamAccountName.ToLower().Trim()
-            $userMap[$ldapKey] = $targetIdentity
+            $userMap[$u.OnPremisesSamAccountName.ToLower().Trim()] = $targetIdentity
         }
         
-        # Fallback for cloud accounts
-        if ($u.UserPrincipalName -match '@') {
-            $prefix = ($u.UserPrincipalName -split '@')[0].ToLower().Trim()
-            $cleanPrefix = ($prefix -split '_')[0]
-            $userMap[$prefix] = $targetIdentity
-            $userMap[$cleanPrefix] = $targetIdentity
+        # 2. Mail Nickname
+        if ($u.MailNickname) {
+            $userMap[$u.MailNickname.ToLower().Trim()] = $targetIdentity
+        }
+
+        # 3. Email prefix & full email
+        if ($u.Mail) {
+            $userMap[$u.Mail.ToLower().Trim()] = $targetIdentity
+            if ($u.Mail -match '@') {
+                $userMap[($u.Mail -split '@')[0].ToLower().Trim()] = $targetIdentity
+            }
+        }
+
+        # 4. Fallback for cloud accounts & UPN prefix
+        if ($u.UserPrincipalName) {
+            $userMap[$u.UserPrincipalName.ToLower().Trim()] = $targetIdentity
+            if ($u.UserPrincipalName -match '@') {
+                $prefix = ($u.UserPrincipalName -split '@')[0].ToLower().Trim()
+                $cleanPrefix = ($prefix -split '_')[0]
+                $userMap[$prefix] = $targetIdentity
+                $userMap[$cleanPrefix] = $targetIdentity
+            }
         }
     }
     Write-Host "  -> Successfully mapped $($userMap.Count) LDAP lookup keys to Entra IDs." -ForegroundColor Gray

@@ -152,7 +152,7 @@ def process_yaml_file(file_path, user_map, dry_run=True):
                 entra_target = user_map.get(ldap_key)
 
                 if entra_target:
-                    if entra_target not in new_saml_users:
+                    if not any(existing.lower() == entra_target.lower() for existing in new_saml_users):
                         new_saml_users.append(entra_target)
                     file_migrations.append({
                         "file": file_path,
@@ -160,11 +160,11 @@ def process_yaml_file(file_path, user_map, dry_run=True):
                         "original_user": u,
                         "entra_user": entra_target
                     })
-                    if u != entra_target or had_legacy:
+                    if u.strip() != entra_target.strip() or had_legacy:
                         modified = True
                 else:
                     # Unmapped user: maintain in saml_users so no access is lost
-                    if u not in new_saml_users:
+                    if not any(existing.lower() == u.lower() for existing in new_saml_users):
                         new_saml_users.append(u)
                     file_unmapped.append({
                         "file": file_path,

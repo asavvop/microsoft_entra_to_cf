@@ -90,18 +90,33 @@ def main():
     user_map = {}
     for u in users:
         target_id = u.get("mail") or u.get("userPrincipalName")
+        if not target_id:
+            continue
         
-        # Match via onPremisesSamAccountName (Hybrid AD sync)
+        # 1. On-Premises sAMAccountName (Legacy AD / Hybrid sync)
         if u.get("onPremisesSamAccountName"):
             user_map[u["onPremisesSamAccountName"].lower().strip()] = target_id
             
-        # Fallback match via UPN prefix (Cloud-native / Lab accounts)
+        # 2. Mail Nickname (Exchange / Entra alias)
+        if u.get("mailNickname"):
+            user_map[u["mailNickname"].lower().strip()] = target_id
+
+        # 3. Email prefix & full email
+        mail = u.get("mail", "")
+        if mail:
+            user_map[mail.lower().strip()] = target_id
+            if "@" in mail:
+                user_map[mail.split("@")[0].lower().strip()] = target_id
+
+        # 4. UPN prefix & full userPrincipalName (Cloud-native / Guest accounts)
         upn = u.get("userPrincipalName", "")
-        if "@" in upn:
-            prefix = upn.split("@")[0].lower().strip()
-            clean_prefix = prefix.split("_")[0]
-            user_map[prefix] = target_id
-            user_map[clean_prefix] = target_id
+        if upn:
+            user_map[upn.lower().strip()] = target_id
+            if "@" in upn:
+                prefix = upn.split("@")[0].lower().strip()
+                clean_prefix = prefix.split("_")[0]  # Handles guest format (e.g. user_external#EXT#)
+                user_map[prefix] = target_id
+                user_map[clean_prefix] = target_id
 
     print(f"  -> Successfully indexed {len(user_map)} Entra user lookup keys.")
 
