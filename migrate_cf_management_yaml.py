@@ -54,18 +54,33 @@ def build_entra_lookup_map(tenant_id, client_id, client_secret):
     user_map = {}
     for u in users:
         target_id = u.get("mail") or u.get("userPrincipalName")
+        if not target_id:
+            continue
         
-        # 1. Primary match: On-Premises sAMAccountName (for Hybrid AD sync)
+        # 1. On-Premises sAMAccountName (Legacy AD / Hybrid sync)
         if u.get("onPremisesSamAccountName"):
             user_map[u["onPremisesSamAccountName"].lower().strip()] = target_id
             
-        # 2. Fallback: UPN prefix & MailNickname (for Cloud-native / Lab accounts)
+        # 2. Mail Nickname (Exchange / Entra alias)
+        if u.get("mailNickname"):
+            user_map[u["mailNickname"].lower().strip()] = target_id
+
+        # 3. Email prefix & full email
+        mail = u.get("mail", "")
+        if mail:
+            user_map[mail.lower().strip()] = target_id
+            if "@" in mail:
+                user_map[mail.split("@")[0].lower().strip()] = target_id
+
+        # 4. UPN prefix & full userPrincipalName (Cloud-native / Guest accounts)
         upn = u.get("userPrincipalName", "")
-        if "@" in upn:
-            prefix = upn.split("@")[0].lower().strip()
-            clean_prefix = prefix.split("_")[0]  # Handles guest accounts format (e.g., user_external#EXT#)
-            user_map[prefix] = target_id
-            user_map[clean_prefix] = target_id
+        if upn:
+            user_map[upn.lower().strip()] = target_id
+            if "@" in upn:
+                prefix = upn.split("@")[0].lower().strip()
+                clean_prefix = prefix.split("_")[0]  # Handles guest format (e.g. user_external#EXT#)
+                user_map[prefix] = target_id
+                user_map[clean_prefix] = target_id
 
     return user_map, users
 
@@ -101,6 +116,8 @@ def dump_entra_users_report(users, json_file="entra_users_dump.json", csv_file="
         print(f"      mail:                     {u.get('mail')}")
         print(f"      mailNickname:             {u.get('mailNickname')}")
 
+import shutil
+
 def process_yaml_file(file_path, user_map, dry_run=True):
     with open(file_path, "r") as f:
         try:
@@ -115,40 +132,52 @@ def process_yaml_file(file_path, user_map, dry_run=True):
 
     for role, role_block in content.items():
         if isinstance(role_block, dict) and any(field in role_block for field in ("users", "ldap_users", "saml_users")):
-            legacy_users = role_block.get("users", []) or []
-            ldap_users = role_block.get("ldap_users", []) or []
-            saml_users = role_block.get("saml_users", []) or []
+            raw_users = role_block.get("users", []) or []
+            raw_ldap = role_block.get("ldap_users", []) or []
+            raw_saml = role_block.get("saml_users", []) or []
 
-            all_ldap_candidates = list(set(legacy_users + ldap_users))
-            remaining_unmapped = []
+            # Check if there were legacy entries that need clearing
+            had_legacy = bool(raw_users or raw_ldap)
 
-            for u in all_ldap_candidates:
-                if not isinstance(u, str):
-                    continue
+            # Gather all candidate users across users, ldap_users, and existing saml_users
+            all_candidates = []
+            for item in raw_users + raw_ldap + raw_saml:
+                if isinstance(item, str) and item.strip() and item.strip() not in all_candidates:
+                    all_candidates.append(item.strip())
+
+            new_saml_users = []
+
+            for u in all_candidates:
                 ldap_key = u.lower().strip()
                 entra_target = user_map.get(ldap_key)
 
                 if entra_target:
-                    if entra_target not in saml_users:
-                        saml_users.append(entra_target)
+                    if entra_target not in new_saml_users:
+                        new_saml_users.append(entra_target)
                     file_migrations.append({
                         "file": file_path,
                         "role": role,
-                        "ldap_user": u,
+                        "original_user": u,
                         "entra_user": entra_target
                     })
-                    modified = True
+                    if u != entra_target or had_legacy:
+                        modified = True
                 else:
-                    remaining_unmapped.append(u)
+                    # Unmapped user: maintain in saml_users so no access is lost
+                    if u not in new_saml_users:
+                        new_saml_users.append(u)
                     file_unmapped.append({
                         "file": file_path,
                         "role": role,
-                        "ldap_user": u
+                        "unmapped_user": u
                     })
+                    if had_legacy:
+                        modified = True
 
             # Update YAML role block
-            role_block["saml_users"] = sorted(saml_users)
-            role_block["users"] = sorted(remaining_unmapped)
+            role_block["saml_users"] = sorted(list(set(new_saml_users)))
+            if "users" in role_block:
+                role_block["users"] = []
             if "ldap_users" in role_block:
                 role_block["ldap_users"] = []
 
@@ -158,6 +187,9 @@ def process_yaml_file(file_path, user_map, dry_run=True):
             with open(preview_path, "w") as f:
                 yaml.dump(content, f, default_flow_style=False, sort_keys=False)
         else:
+            # Create backup file of the original before overwriting
+            backup_path = file_path + ".bak"
+            shutil.copy2(file_path, backup_path)
             with open(file_path, "w") as f:
                 yaml.dump(content, f, default_flow_style=False, sort_keys=False)
 
@@ -166,7 +198,7 @@ def process_yaml_file(file_path, user_map, dry_run=True):
 def main():
     parser = argparse.ArgumentParser(description="Transform cf-management YAML configs from LDAP to Entra SAML.")
     parser.add_argument("--dir", default="./sample_cf_management_repo", help="Path to cf-management config directory (default: ./sample_cf_management_repo)")
-    parser.add_argument("--live", action="store_true", help="Modify YAML files in-place (default is Dry-Run)")
+    parser.add_argument("--live", action="store_true", help="Modify YAML files in-place with .bak backups (default is Dry-Run)")
     parser.add_argument("--dump-users", action="store_true", help="Export all fetched Entra users to entra_users_dump.json & .csv with sample prints")
     parser.add_argument("--dump-only", action="store_true", help="Only dump/search Entra users without running YAML transformation")
     parser.add_argument("--search-user", help="Search and display raw Entra ID attributes for a specific user")
@@ -188,7 +220,7 @@ def main():
     print("=" * 70)
     print("  🚀 cf-management YAML Config Transformer (LDAP ➡️ Entra ID SAML)")
     if not args.dump_only:
-        print(f"  Mode: {'DRY RUN (Generates .preview.yml files)' if dry_run else 'LIVE IN-PLACE MODIFICATION'}")
+        print(f"  Mode: {'DRY RUN (Generates .preview.yml files)' if dry_run else 'LIVE IN-PLACE MODIFICATION (Creates .bak backups)'}")
         print(f"  Target Directory: {args.dir}")
     print("=" * 70)
 
@@ -222,7 +254,7 @@ def main():
     yaml_files = []
     for root, _, files in os.walk(args.dir):
         for file in files:
-            if file.endswith((".yml", ".yaml")) and not file.endswith(".preview.yml"):
+            if file.endswith((".yml", ".yaml")) and not file.endswith((".preview.yml", ".bak")):
                 yaml_files.append(os.path.join(root, file))
 
     print(f"  -> Found {len(yaml_files)} YAML config files.")
@@ -238,31 +270,31 @@ def main():
         if migrations or unmapped:
             print(f"\n📄 {rel_path}:")
             for m in migrations:
-                print(f"   ✅ [{m['role']}] {m['ldap_user']} ➡️  {m['entra_user']} (Added to saml_users)")
+                print(f"   ✅ [{m['role']}] {m['original_user']} ➡️  {m['entra_user']} (Updated in saml_users)")
             for u in unmapped:
-                print(f"   ⚠️  [{u['role']}] {u['ldap_user']} (No Entra match - kept in unmapped)")
+                print(f"   ⚠️  [{u['role']}] {u['unmapped_user']} (No Entra match - maintained in saml_users)")
             all_migrations.extend(migrations)
             all_unmapped.extend(unmapped)
 
     # 4. Export CSV Reports
-    with open("yaml_migration_plan.csv", "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["file", "role", "ldap_user", "entra_user"])
+    with open("yaml_mapped_users.csv", "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["file", "role", "original_user", "entra_user"])
         writer.writeheader()
         writer.writerows(all_migrations)
 
     with open("yaml_unmapped_users.csv", "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["file", "role", "ldap_user"])
+        writer = csv.DictWriter(f, fieldnames=["file", "role", "unmapped_user"])
         writer.writeheader()
         writer.writerows(all_unmapped)
 
     print("\n" + "=" * 70)
     print(f"📊 Summary:")
-    print(f"  - Total Roles Migrated: {len(all_migrations)} (saved to 'yaml_migration_plan.csv')")
-    print(f"  - Total Unmapped Roles: {len(all_unmapped)} (saved to 'yaml_unmapped_users.csv')")
+    print(f"  - Total Mapped Users:   {len(all_migrations)} (saved to 'yaml_mapped_users.csv')")
+    print(f"  - Total Unmapped Users: {len(all_unmapped)} (saved to 'yaml_unmapped_users.csv')")
     if dry_run:
         print("  - Preview files created with '.preview.yml' extension. Review before applying --live.")
     else:
-        print("  - All YAML files updated in-place!")
+        print("  - All YAML files updated in-place (original backups created with '.bak' extension)!")
     print("=" * 70)
 
 if __name__ == "__main__":
