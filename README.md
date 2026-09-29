@@ -81,7 +81,7 @@ The migration scripts require an App Registration in Microsoft Entra with **Appl
 * Recursively scans your `cf-management` Git repository.
 * Automatically recognizes all role blocks (`space-developer`, `space-manager`, `space-auditor`, `space-supporter`, `org-manager`, `org-auditor`, `billing-manager`, etc.).
 * Scans all candidate user lists: **`users`**, **`ldap_users`**, and **`saml_users`**.
-* **Zero Access Loss Guarantee**: Translates mapped users to their Entra ID email format, and **maintains unmapped users** in `saml_users` so nobody is accidentally locked out.
+* **Zero Access Loss Guarantee**: Translates mapped users to their Entra ID identity (default: **UserPrincipalName / UPN**), and **maintains unmapped users** in `saml_users` so nobody is accidentally locked out.
 * Cleans up legacy `users:` and `ldap_users:` fields once consolidated into `saml_users:`.
 * **Automatic Backups**: Generates `.bak` backup copies of original files before in-place modification in `--live` mode.
 * Generates side-by-side preview files (`.preview.yml`) in Dry-Run mode.
@@ -95,6 +95,7 @@ The migration scripts require an App Registration in Microsoft Entra with **Appl
 export ENTRA_TENANT_ID="<YOUR_TENANT_ID>"
 export ENTRA_CLIENT_ID="<YOUR_CLIENT_ID>"
 export ENTRA_CLIENT_SECRET="<YOUR_CLIENT_SECRET>"
+export ENTRA_IDENTITY_TYPE="upn"   # 'upn' (default, recommended for Tanzu) or 'email'
 
 # 2. Run in Dry-Run Preview Mode (Generates .preview.yml files & CSV reports)
 python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config
@@ -107,7 +108,13 @@ column -t -s, yaml_unmapped_users.csv
 # 4. Apply In-Place Live (Creates .bak backups automatically)
 python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config --live
 
-# 5. Caching Options (Optimized for large enterprise tenants with 50k - 100k+ users)
+# 5. Target Identity Options (UPN vs Email)
+# By default, Tanzu Elastic Runtime validates SAML NameID against UserPrincipalName
+python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config --identity-type upn
+# To target Mail instead:
+python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config --identity-type email
+
+# 6. Caching Options (Optimized for large enterprise tenants with 50k - 100k+ users)
 # By default, Entra ID users are cached locally in .entra_users_cache.json for 4.0 hours
 python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config
 
@@ -118,7 +125,7 @@ python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config --refr
 python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config --cache-ttl 8.0
 python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config --no-cache
 
-# 6. Diagnostic / Verification Commands (Optional)
+# 7. Diagnostic / Verification Commands (Optional)
 # Dump all Entra users to JSON/CSV and print attribute breakdown
 python3 migrate_cf_management_yaml.py --dump-only
 
@@ -140,11 +147,12 @@ Available in both **Python** (`migrate_ldap_to_entra.py`) and **PowerShell** (`m
 # 1. Log in to Cloud Foundry CLI as admin
 cf login -a https://api.sys.example.com -u admin -o system -s system
 
-# 2. Export Entra Credentials
+# 2. Export Entra Credentials & Configuration
 export ENTRA_TENANT_ID="<YOUR_TENANT_ID>"
 export ENTRA_CLIENT_ID="<YOUR_CLIENT_ID>"
 export ENTRA_CLIENT_SECRET="<YOUR_CLIENT_SECRET>"
-export NEW_ORIGIN="EntraSAML"   # (or your custom provider origin key)
+export NEW_ORIGIN="EntraSAML"             # (or your custom provider origin key)
+export ENTRA_IDENTITY_TYPE="upn"          # 'upn' (default) or 'email'
 
 # 3. Run Dry-Run Preview
 python3 migrate_ldap_to_entra.py
@@ -166,11 +174,11 @@ Connect-MgGraph -Scopes "User.Read.All"
 # 2. Log in to Cloud Foundry
 cf login -a https://api.sys.example.com
 
-# 3. Run Dry-Run Preview
-./migrate_ldap_to_entra.ps1 -DryRun -NewOrigin "EntraSAML"
+# 3. Run Dry-Run Preview (defaults to UPN)
+./migrate_ldap_to_entra.ps1 -DryRun -NewOrigin "EntraSAML" -EntraIdentityType "UPN"
 
 # 4. Execute Live Migration
-./migrate_ldap_to_entra.ps1 -DryRun:$false -NewOrigin "EntraSAML"
+./migrate_ldap_to_entra.ps1 -DryRun:$false -NewOrigin "EntraSAML" -EntraIdentityType "UPN"
 ```
 
 ---
