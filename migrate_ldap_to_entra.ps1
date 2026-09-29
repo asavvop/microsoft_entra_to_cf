@@ -13,7 +13,7 @@ param (
 
     [Parameter(Mandatory=$false)]
     [ValidateSet("Email", "UPN")]
-    [string]$EntraIdentityType = "Email",
+    [string]$EntraIdentityType = "UPN",
 
     [Parameter(Mandatory=$false)]
     [switch]$DryRun = $true

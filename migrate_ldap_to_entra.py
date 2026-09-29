@@ -60,6 +60,7 @@ def main():
     parser = argparse.ArgumentParser(description="Live Tanzu Platform LDAP to Entra ID Role Migration.")
     parser.add_argument("--live", action="store_true", help="Execute live migration against Cloud Foundry (default is Dry-Run)")
     parser.add_argument("--origin", default=os.environ.get("NEW_ORIGIN", "EntraSAML"), help="New identity provider origin key in Tanzu (default: EntraSAML)")
+    parser.add_argument("--identity-type", choices=["upn", "email"], default=os.environ.get("ENTRA_IDENTITY_TYPE", "upn"), help="Target identity attribute from Entra (default: upn)")
     parser.add_argument("--tenant-id", default=os.environ.get("ENTRA_TENANT_ID"), help="Microsoft Entra Tenant ID (or env ENTRA_TENANT_ID)")
     parser.add_argument("--client-id", default=os.environ.get("ENTRA_CLIENT_ID"), help="App Registration Client ID (or env ENTRA_CLIENT_ID)")
     parser.add_argument("--client-secret", default=os.environ.get("ENTRA_CLIENT_SECRET"), help="App Registration Client Secret (or env ENTRA_CLIENT_SECRET)")
@@ -88,6 +89,7 @@ def main():
     print("  Tanzu LDAP -> Entra ID Live Role Migration Tool")
     print(f"  Mode: {'DRY RUN (Preview Only)' if dry_run else 'LIVE EXECUTION'}")
     print(f"  Target Origin: {args.origin}")
+    print(f"  Identity Attribute: {args.identity_type.upper()} (UserPrincipalName)" if args.identity_type == "upn" else f"  Identity Attribute: {args.identity_type.upper()} (Email)")
     print("=" * 65)
 
     # 1. Build Entra Lookup Map
@@ -101,7 +103,10 @@ def main():
     
     user_map = {}
     for u in users:
-        target_id = u.get("mail") or u.get("userPrincipalName")
+        if args.identity_type == "email":
+            target_id = u.get("mail") or u.get("userPrincipalName")
+        else:
+            target_id = u.get("userPrincipalName") or u.get("mail")
         if not target_id:
             continue
         
