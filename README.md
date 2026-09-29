@@ -107,7 +107,18 @@ column -t -s, yaml_unmapped_users.csv
 # 4. Apply In-Place Live (Creates .bak backups automatically)
 python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config --live
 
-# 5. Diagnostic / Verification Commands (Optional)
+# 5. Caching Options (Optimized for large enterprise tenants with 50k - 100k+ users)
+# By default, Entra ID users are cached locally in .entra_users_cache.json for 4.0 hours
+python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config
+
+# Force refresh the cache from Microsoft Graph
+python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config --refresh-cache
+
+# Custom cache TTL (e.g. 8 hours) or disable cache
+python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config --cache-ttl 8.0
+python3 migrate_cf_management_yaml.py --dir /path/to/cf-management-config --no-cache
+
+# 6. Diagnostic / Verification Commands (Optional)
 # Dump all Entra users to JSON/CSV and print attribute breakdown
 python3 migrate_cf_management_yaml.py --dump-only
 

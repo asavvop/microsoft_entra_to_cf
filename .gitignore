@@ -5,7 +5,11 @@ __pycache__/
 
 # Preview and temporary migration files
 *.preview.yml
+*.bak
+*.tmp
 *.csv
+*.json
+.entra_users_cache.json
 
 # Environment variables
 .env
