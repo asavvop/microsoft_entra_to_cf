@@ -11,6 +11,7 @@ import os
 import sys
 import json
 import csv
+import time
 import argparse
 import subprocess
 import urllib.request
@@ -46,6 +47,55 @@ def get_entra_users(token):
                 
     return all_users
 
+def check_cache_status(cache_path, ttl_hours):
+    """
+    Checks if a valid cache file exists and is within TTL.
+    Returns (is_valid, age_hours, users_list)
+    """
+    if not os.path.exists(cache_path):
+        return False, 0.0, None
+    try:
+        mtime = os.path.getmtime(cache_path)
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if isinstance(data, dict) and "users" in data:
+            cached_time = data.get("cached_at", mtime)
+            users = data.get("users", [])
+        elif isinstance(data, list):
+            cached_time = mtime
+            users = data
+        else:
+            return False, 0.0, None
+
+        age_seconds = time.time() - cached_time
+        age_hours = age_seconds / 3600.0
+
+        is_valid = (age_hours <= ttl_hours)
+        return is_valid, age_hours, users
+    except Exception as e:
+        print(f"  ⚠️ Warning: Failed reading cache file '{cache_path}': {e}")
+        return False, 0.0, None
+
+def save_users_cache(cache_path, users, tenant_id=None):
+    """
+    Saves users to local JSON cache file atomically.
+    """
+    try:
+        cache_data = {
+            "cached_at": time.time(),
+            "tenant_id": tenant_id,
+            "user_count": len(users),
+            "users": users
+        }
+        tmp_path = cache_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f)
+        os.replace(tmp_path, cache_path)
+        print(f"  💾 Saved {len(users)} users to cache: '{cache_path}' (valid for 4 hours)")
+    except Exception as e:
+        print(f"  ⚠️ Warning: Could not save cache to '{cache_path}': {e}")
+
 def cf_curl(endpoint):
     out = subprocess.check_output(["cf", "curl", endpoint])
     return json.loads(out.decode("utf-8"))
@@ -61,19 +111,15 @@ def main():
     parser.add_argument("--live", action="store_true", help="Execute live migration against Cloud Foundry (default is Dry-Run)")
     parser.add_argument("--origin", default=os.environ.get("NEW_ORIGIN", "EntraSAML"), help="New identity provider origin key in Tanzu (default: EntraSAML)")
     parser.add_argument("--identity-type", choices=["upn", "email"], default=os.environ.get("ENTRA_IDENTITY_TYPE", "upn"), help="Target identity attribute from Entra (default: upn)")
+    parser.add_argument("--cache-file", default=".entra_users_cache.json", help="Path to Entra users cache file (default: .entra_users_cache.json)")
+    parser.add_argument("--cache-ttl", type=float, default=4.0, help="Cache Time-To-Live in hours (default: 4.0 hours)")
+    parser.add_argument("--refresh-cache", action="store_true", help="Bypass cache and force fresh download from Microsoft Graph")
+    parser.add_argument("--no-cache", action="store_true", help="Disable caching entirely (always fetch live, do not save to disk)")
     parser.add_argument("--tenant-id", default=os.environ.get("ENTRA_TENANT_ID"), help="Microsoft Entra Tenant ID (or env ENTRA_TENANT_ID)")
     parser.add_argument("--client-id", default=os.environ.get("ENTRA_CLIENT_ID"), help="App Registration Client ID (or env ENTRA_CLIENT_ID)")
     parser.add_argument("--client-secret", default=os.environ.get("ENTRA_CLIENT_SECRET"), help="App Registration Client Secret (or env ENTRA_CLIENT_SECRET)")
     parser.add_argument("--uaa-url", default=os.environ.get("UAA_URL"), help="Tanzu UAA Base URL (e.g., https://login.sys.example.com)")
     args = parser.parse_args()
-
-    if not args.tenant_id or not args.client_id or not args.client_secret:
-        print("❌ Error: Microsoft Entra credentials are required.")
-        print("Please provide --tenant-id, --client-id, and --client-secret, or export environment variables:")
-        print("  export ENTRA_TENANT_ID='<YOUR_TENANT_ID>'")
-        print("  export ENTRA_CLIENT_ID='<YOUR_CLIENT_ID>'")
-        print("  export ENTRA_CLIENT_SECRET='<YOUR_CLIENT_SECRET>'")
-        sys.exit(1)
 
     # Auto-detect UAA URL from CF API if not explicitly supplied
     if not args.uaa_url:
@@ -92,14 +138,40 @@ def main():
     print(f"  Identity Attribute: {args.identity_type.upper()} (UserPrincipalName)" if args.identity_type == "upn" else f"  Identity Attribute: {args.identity_type.upper()} (Email)")
     print("=" * 65)
 
-    # 1. Build Entra Lookup Map
-    print("\n[1/3] Fetching users from Microsoft Graph...")
-    try:
-        token = get_graph_token(args.tenant_id, args.client_id, args.client_secret)
-        users = get_entra_users(token)
-    except Exception as e:
-        print(f"❌ Error connecting to Microsoft Graph: {e}")
-        sys.exit(1)
+    # 1. Fetch or Load Entra Users
+    print("\n[1/3] Fetching Entra ID user identities...")
+    raw_users = None
+
+    if not args.no_cache and not args.refresh_cache:
+        is_valid, age_hours, cached_users = check_cache_status(args.cache_file, args.cache_ttl)
+        if is_valid and cached_users:
+            raw_users = cached_users
+            print(f"  📦 Loaded {len(raw_users)} users from local cache: '{args.cache_file}'")
+            print(f"     (Age: {age_hours:.1f}h / TTL: {args.cache_ttl}h | Use --refresh-cache to force update)")
+        elif cached_users is not None and not is_valid:
+            print(f"  ⏳ Cache '{args.cache_file}' expired (Age: {age_hours:.1f}h > TTL {args.cache_ttl}h). Fetching fresh from Graph...")
+
+    if raw_users is None:
+        if not args.tenant_id or not args.client_id or not args.client_secret:
+            print("❌ Error: Microsoft Entra credentials are required to fetch fresh data from Graph API.")
+            print("Please provide --tenant-id, --client-id, and --client-secret, or export environment variables:")
+            print("  export ENTRA_TENANT_ID='<YOUR_TENANT_ID>'")
+            print("  export ENTRA_CLIENT_ID='<YOUR_CLIENT_ID>'")
+            print("  export ENTRA_CLIENT_SECRET='<YOUR_CLIENT_SECRET>'")
+            sys.exit(1)
+
+        print("  🌐 Connecting to Microsoft Graph API...")
+        try:
+            token = get_graph_token(args.tenant_id, args.client_id, args.client_secret)
+            raw_users = get_entra_users(token)
+            print(f"  -> Successfully fetched {len(raw_users)} users from Microsoft Graph.")
+            if not args.no_cache:
+                save_users_cache(args.cache_file, raw_users, tenant_id=args.tenant_id)
+        except Exception as e:
+            print(f"❌ Error connecting to Microsoft Graph: {e}")
+            sys.exit(1)
+
+    users = raw_users
     
     user_map = {}
     for u in users:
