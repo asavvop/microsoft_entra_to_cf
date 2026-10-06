@@ -106,11 +106,53 @@ def get_uaa_users(uaa_url):
     out = subprocess.check_output(cmd, shell=True)
     return json.loads(out.decode("utf-8")).get("resources", [])
 
+def build_user_map_from_users(users, identity_type="samaccountname"):
+    user_map = {}
+    norm_type = (identity_type or "samaccountname").lower().strip()
+    for u in users:
+        if norm_type in ("upn", "principal", "userprincipalname"):
+            target_id = u.get("userPrincipalName") or u.get("mail") or u.get("onPremisesSamAccountName") or u.get("mailNickname")
+        elif norm_type == "email":
+            target_id = u.get("mail") or u.get("userPrincipalName") or u.get("onPremisesSamAccountName") or u.get("mailNickname")
+        else:  # default: onPremisesSamAccountName / samaccountname
+            target_id = u.get("onPremisesSamAccountName") or u.get("mailNickname") or (u.get("userPrincipalName", "").split("@")[0] if u.get("userPrincipalName") else None) or u.get("userPrincipalName") or u.get("mail")
+        
+        if not target_id:
+            continue
+        
+        # 1. On-Premises sAMAccountName (Legacy AD / Hybrid sync)
+        if u.get("onPremisesSamAccountName"):
+            user_map[u["onPremisesSamAccountName"].lower().strip()] = target_id
+            
+        # 2. Mail Nickname (Exchange / Entra alias)
+        if u.get("mailNickname"):
+            user_map[u["mailNickname"].lower().strip()] = target_id
+
+        # 3. Email prefix & full email
+        mail = u.get("mail", "")
+        if mail:
+            user_map[mail.lower().strip()] = target_id
+            if "@" in mail:
+                user_map[mail.split("@")[0].lower().strip()] = target_id
+
+        # 4. UPN prefix & full userPrincipalName (Cloud-native / Guest accounts)
+        upn = u.get("userPrincipalName", "")
+        if upn:
+            user_map[upn.lower().strip()] = target_id
+            if "@" in upn:
+                prefix = upn.split("@")[0].lower().strip()
+                clean_prefix = prefix.split("_")[0]  # Handles guest format (e.g. user_external#EXT#)
+                user_map[prefix] = target_id
+                user_map[clean_prefix] = target_id
+
+    return user_map
+
 def main():
     parser = argparse.ArgumentParser(description="Live Tanzu Platform LDAP to Entra ID Role Migration.")
     parser.add_argument("--live", action="store_true", help="Execute live migration against Cloud Foundry (default is Dry-Run)")
     parser.add_argument("--origin", default=os.environ.get("NEW_ORIGIN", "EntraSAML"), help="New identity provider origin key in Tanzu (default: EntraSAML)")
-    parser.add_argument("--identity-type", choices=["upn", "email"], default=os.environ.get("ENTRA_IDENTITY_TYPE", "upn"), help="Target identity attribute from Entra (default: upn)")
+    parser.add_argument("--use-upn", "--upn", action="store_true", dest="use_upn", help="Use UserPrincipalName (UPN) instead of onPremisesSamAccountName as the output target identity")
+    parser.add_argument("--identity-type", choices=["samaccountname", "upn", "email", "onPremisesSamAccountName", "sam"], default=os.environ.get("ENTRA_IDENTITY_TYPE", "samaccountname"), help="Target identity attribute from Entra: 'samaccountname' (default), 'upn', or 'email'")
     parser.add_argument("--cache-file", default=".entra_users_cache.json", help="Path to Entra users cache file (default: .entra_users_cache.json)")
     parser.add_argument("--cache-ttl", type=float, default=4.0, help="Cache Time-To-Live in hours (default: 4.0 hours)")
     parser.add_argument("--refresh-cache", action="store_true", help="Bypass cache and force fresh download from Microsoft Graph")
@@ -120,6 +162,21 @@ def main():
     parser.add_argument("--client-secret", default=os.environ.get("ENTRA_CLIENT_SECRET"), help="App Registration Client Secret (or env ENTRA_CLIENT_SECRET)")
     parser.add_argument("--uaa-url", default=os.environ.get("UAA_URL"), help="Tanzu UAA Base URL (e.g., https://login.sys.example.com)")
     args = parser.parse_args()
+
+    # Determine target identity type: --use-upn / --upn overrides --identity-type
+    raw_identity_type = "upn" if args.use_upn else args.identity_type.lower()
+    if raw_identity_type in ("samaccountname", "sam", "onpremisessamaccountname"):
+        identity_type = "samaccountname"
+        ident_desc = "onPremisesSamAccountName (sAMAccountName)"
+    elif raw_identity_type in ("upn", "principal", "userprincipalname"):
+        identity_type = "upn"
+        ident_desc = "UserPrincipalName (UPN)"
+    elif raw_identity_type == "email":
+        identity_type = "email"
+        ident_desc = "Email (mail)"
+    else:
+        identity_type = "samaccountname"
+        ident_desc = "onPremisesSamAccountName (sAMAccountName)"
 
     # Auto-detect UAA URL from CF API if not explicitly supplied
     if not args.uaa_url:
@@ -135,7 +192,7 @@ def main():
     print("  Tanzu LDAP -> Entra ID Live Role Migration Tool")
     print(f"  Mode: {'DRY RUN (Preview Only)' if dry_run else 'LIVE EXECUTION'}")
     print(f"  Target Origin: {args.origin}")
-    print(f"  Identity Attribute: {args.identity_type.upper()} (UserPrincipalName)" if args.identity_type == "upn" else f"  Identity Attribute: {args.identity_type.upper()} (Email)")
+    print(f"  Identity Attribute: {ident_desc}")
     print("=" * 65)
 
     # 1. Fetch or Load Entra Users
@@ -172,41 +229,7 @@ def main():
             sys.exit(1)
 
     users = raw_users
-    
-    user_map = {}
-    for u in users:
-        if args.identity_type == "email":
-            target_id = u.get("mail") or u.get("userPrincipalName")
-        else:
-            target_id = u.get("userPrincipalName") or u.get("mail")
-        if not target_id:
-            continue
-        
-        # 1. On-Premises sAMAccountName (Legacy AD / Hybrid sync)
-        if u.get("onPremisesSamAccountName"):
-            user_map[u["onPremisesSamAccountName"].lower().strip()] = target_id
-            
-        # 2. Mail Nickname (Exchange / Entra alias)
-        if u.get("mailNickname"):
-            user_map[u["mailNickname"].lower().strip()] = target_id
-
-        # 3. Email prefix & full email
-        mail = u.get("mail", "")
-        if mail:
-            user_map[mail.lower().strip()] = target_id
-            if "@" in mail:
-                user_map[mail.split("@")[0].lower().strip()] = target_id
-
-        # 4. UPN prefix & full userPrincipalName (Cloud-native / Guest accounts)
-        upn = u.get("userPrincipalName", "")
-        if upn:
-            user_map[upn.lower().strip()] = target_id
-            if "@" in upn:
-                prefix = upn.split("@")[0].lower().strip()
-                clean_prefix = prefix.split("_")[0]  # Handles guest format (e.g. user_external#EXT#)
-                user_map[prefix] = target_id
-                user_map[clean_prefix] = target_id
-
+    user_map = build_user_map_from_users(users, identity_type=identity_type)
     print(f"  -> Successfully indexed {len(user_map)} Entra user lookup keys.")
 
     # 2. Fetch CF Roles & UAA Identities

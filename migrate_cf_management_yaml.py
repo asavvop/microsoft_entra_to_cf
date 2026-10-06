@@ -98,13 +98,17 @@ def save_users_cache(cache_path, users, tenant_id=None):
     except Exception as e:
         print(f"  ⚠️ Warning: Could not save cache to '{cache_path}': {e}")
 
-def build_user_map_from_users(users, identity_type="upn"):
+def build_user_map_from_users(users, identity_type="samaccountname"):
     user_map = {}
+    norm_type = (identity_type or "samaccountname").lower().strip()
     for u in users:
-        if identity_type == "email":
-            target_id = u.get("mail") or u.get("userPrincipalName")
-        else:
-            target_id = u.get("userPrincipalName") or u.get("mail")
+        if norm_type in ("upn", "principal", "userprincipalname"):
+            target_id = u.get("userPrincipalName") or u.get("mail") or u.get("onPremisesSamAccountName") or u.get("mailNickname")
+        elif norm_type == "email":
+            target_id = u.get("mail") or u.get("userPrincipalName") or u.get("onPremisesSamAccountName") or u.get("mailNickname")
+        else:  # default: onPremisesSamAccountName / samaccountname
+            target_id = u.get("onPremisesSamAccountName") or u.get("mailNickname") or (u.get("userPrincipalName", "").split("@")[0] if u.get("userPrincipalName") else None) or u.get("userPrincipalName") or u.get("mail")
+        
         if not target_id:
             continue
         
@@ -255,11 +259,27 @@ def main():
     parser.add_argument("--cache-ttl", type=float, default=4.0, help="Cache Time-To-Live in hours (default: 4.0 hours)")
     parser.add_argument("--refresh-cache", action="store_true", help="Bypass cache and force fresh download from Microsoft Graph")
     parser.add_argument("--no-cache", action="store_true", help="Disable caching entirely (always fetch live, do not save to disk)")
-    parser.add_argument("--identity-type", choices=["upn", "email"], default=os.environ.get("ENTRA_IDENTITY_TYPE", "upn"), help="Target identity attribute from Entra (default: upn)")
+    parser.add_argument("--use-upn", "--upn", action="store_true", dest="use_upn", help="Use UserPrincipalName (UPN) instead of onPremisesSamAccountName as the output target identity")
+    parser.add_argument("--identity-type", choices=["samaccountname", "upn", "email", "onPremisesSamAccountName", "sam"], default=os.environ.get("ENTRA_IDENTITY_TYPE", "samaccountname"), help="Target identity attribute from Entra: 'samaccountname' (default), 'upn', or 'email'")
     parser.add_argument("--tenant-id", default=os.environ.get("ENTRA_TENANT_ID"), help="Microsoft Entra Tenant ID (or env ENTRA_TENANT_ID)")
     parser.add_argument("--client-id", default=os.environ.get("ENTRA_CLIENT_ID"), help="App Registration Client ID (or env ENTRA_CLIENT_ID)")
     parser.add_argument("--client-secret", default=os.environ.get("ENTRA_CLIENT_SECRET"), help="App Registration Client Secret (or env ENTRA_CLIENT_SECRET)")
     args = parser.parse_args()
+
+    # Determine target identity type: --use-upn / --upn overrides --identity-type
+    raw_identity_type = "upn" if args.use_upn else args.identity_type.lower()
+    if raw_identity_type in ("samaccountname", "sam", "onpremisessamaccountname"):
+        identity_type = "samaccountname"
+        ident_desc = "onPremisesSamAccountName (sAMAccountName)"
+    elif raw_identity_type in ("upn", "principal", "userprincipalname"):
+        identity_type = "upn"
+        ident_desc = "UserPrincipalName (UPN)"
+    elif raw_identity_type == "email":
+        identity_type = "email"
+        ident_desc = "Email (mail)"
+    else:
+        identity_type = "samaccountname"
+        ident_desc = "onPremisesSamAccountName (sAMAccountName)"
 
     dry_run = not args.live
 
@@ -268,7 +288,7 @@ def main():
     if not args.dump_only:
         print(f"  Mode: {'DRY RUN (Generates .preview.yml files)' if dry_run else 'LIVE IN-PLACE MODIFICATION (Creates .bak backups)'}")
         print(f"  Target Directory: {args.dir}")
-        print(f"  Identity Attribute: {args.identity_type.upper()} (UserPrincipalName)" if args.identity_type == "upn" else f"  Identity Attribute: {args.identity_type.upper()} (Email)")
+        print(f"  Identity Attribute: {ident_desc}")
     print("=" * 70)
 
     # 1. Fetch or Load Entra Users
@@ -306,7 +326,7 @@ def main():
             print(f"  ❌ Error querying Microsoft Graph: {e}")
             sys.exit(1)
 
-    user_map = build_user_map_from_users(raw_users, identity_type=args.identity_type)
+    user_map = build_user_map_from_users(raw_users, identity_type=identity_type)
     print(f"  -> Indexed {len(user_map)} unique lookup keys for mapping.")
 
     if args.dump_users or args.dump_only:

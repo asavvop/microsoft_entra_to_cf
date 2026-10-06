@@ -12,16 +12,22 @@ param (
     [string]$NewOrigin = "EntraSAML",
 
     [Parameter(Mandatory=$false)]
-    [ValidateSet("Email", "UPN")]
-    [string]$EntraIdentityType = "UPN",
+    [ValidateSet("samaccountname", "SAMAccountName", "UPN", "upn", "Email", "email")]
+    [string]$EntraIdentityType = "samaccountname",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$UseUPN = $false,
 
     [Parameter(Mandatory=$false)]
     [switch]$DryRun = $true
 )
 
+$identType = if ($UseUPN) { "UPN" } else { $EntraIdentityType }
+
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host "  Tanzu LDAP -> Entra ID User Role Migration Tool" -ForegroundColor Cyan
 Write-Host "  Mode: $(if ($DryRun) {'DRY RUN (Preview Only)'} else {'LIVE EXECUTION'})" -ForegroundColor Yellow
+Write-Host "  Identity Attribute: $(if ($identType -match '^(upn|UPN)$') {'UserPrincipalName (UPN)'} elseif ($identType -match '^(email|Email)$') {'Email'} else {'onPremisesSamAccountName (sAMAccountName)'})" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
 # ---------------------------------------------------------
@@ -40,7 +46,14 @@ try {
     
     $userMap = @{}
     foreach ($u in $allEntraUsers) {
-        $targetIdentity = if ($EntraIdentityType -eq "Email" -and $u.Mail) { $u.Mail } else { $u.UserPrincipalName }
+        if ($identType -match '^(upn|UPN)$') {
+            $targetIdentity = if ($u.UserPrincipalName) { $u.UserPrincipalName } elseif ($u.Mail) { $u.Mail } else { $u.OnPremisesSamAccountName }
+        } elseif ($identType -match '^(email|Email)$') {
+            $targetIdentity = if ($u.Mail) { $u.Mail } elseif ($u.UserPrincipalName) { $u.UserPrincipalName } else { $u.OnPremisesSamAccountName }
+        } else {
+            # Default: onPremisesSamAccountName with fallbacks
+            $targetIdentity = if ($u.OnPremisesSamAccountName) { $u.OnPremisesSamAccountName } elseif ($u.MailNickname) { $u.MailNickname } elseif ($u.UserPrincipalName) { ($u.UserPrincipalName -split '@')[0] } else { $u.Mail }
+        }
         if (-not $targetIdentity) { continue }
 
         # 1. On-Premises sAMAccountName
