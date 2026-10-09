@@ -1,0 +1,114 @@
+---
+jobs:
+  # -------------------------------------------------------------
+  # Job 1: Backup Ops Manager Installation State & Settings
+  # -------------------------------------------------------------
+  - name: export-opsman-backup
+    plan:
+      - task: export-installation
+        config:
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: ubuntu
+              tag: "22.04"
+          params:
+            OPSMAN_TARGET: "https://opsman.sys.example.com"
+            OPSMAN_CLIENT_ID: ((opsman_client_id))
+            OPSMAN_CLIENT_SECRET: ((opsman_client_secret))
+            OPSMAN_DECRYPTION_PASSPHRASE: ((opsman_passphrase))
+          run:
+            path: sh
+            args:
+              - -exc
+              - |
+                echo "Installing dependencies & om CLI..."
+                apt-get update -qq && apt-get install -y -qq curl ca-certificates > /dev/null
+                curl -sSL -o /usr/local/bin/om "https://github.com/pivotal-cf/om/releases/download/7.12.0/om-linux-amd64-7.12.0"
+                chmod +x /usr/local/bin/om
+                
+                echo "Exporting Ops Manager Installation State via OAuth2 Client Credentials..."
+                om -t $OPSMAN_TARGET -k \
+                  --client-id $OPSMAN_CLIENT_ID \
+                  --client-secret $OPSMAN_CLIENT_SECRET \
+                  export-installation \
+                  -d $OPSMAN_DECRYPTION_PASSPHRASE \
+                  -o /tmp/installation-export.zip
+                
+                echo "Backup completed successfully! Size:"
+                ls -lh /tmp/installation-export.zip
+
+  # -------------------------------------------------------------
+  # Job 2: Audit Staged Tiles & Pending Changes
+  # -------------------------------------------------------------
+  - name: audit-pending-changes
+    plan:
+      - task: inspect-changes
+        config:
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: ubuntu
+              tag: "22.04"
+          params:
+            OPSMAN_TARGET: "https://opsman.sys.example.com"
+            OPSMAN_CLIENT_ID: ((opsman_client_id))
+            OPSMAN_CLIENT_SECRET: ((opsman_client_secret))
+          run:
+            path: sh
+            args:
+              - -exc
+              - |
+                echo "Installing dependencies & om CLI..."
+                apt-get update -qq && apt-get install -y -qq curl ca-certificates > /dev/null
+                curl -sSL -o /usr/local/bin/om "https://github.com/pivotal-cf/om/releases/download/7.12.0/om-linux-amd64-7.12.0"
+                chmod +x /usr/local/bin/om
+                
+                echo "Listing Staged Products..."
+                om -t $OPSMAN_TARGET -k \
+                  --client-id $OPSMAN_CLIENT_ID \
+                  --client-secret $OPSMAN_CLIENT_SECRET \
+                  staged-products
+
+                echo "Checking Pending Changes..."
+                om -t $OPSMAN_TARGET -k \
+                  --client-id $OPSMAN_CLIENT_ID \
+                  --client-secret $OPSMAN_CLIENT_SECRET \
+                  pending-changes
+
+    # -------------------------------------------------------------
+  # Job 3: Verify TAS BOSH Deployment Health
+  # -------------------------------------------------------------
+  - name: check-tas-health
+    plan:
+      - task: verify-cf-vms
+        config:
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: governmentpaas/cf-cli
+              tag: latest
+          params:
+            CF_API: "https://api.sys.example.com"
+            CF_ORG: "sample-org"
+            CF_CLIENT_ID: ((cf_client_id))
+            CF_CLIENT_SECRET: ((cf_client_secret))
+          run:
+            path: sh
+            args:
+              - -exc
+              - |
+                echo "Targeting TAS API & Authenticating..."
+                cf api $CF_API --skip-ssl-validation
+                cf auth $CF_CLIENT_ID $CF_CLIENT_SECRET --client-credentials
+                
+                echo "Checking Cloud Controller API Info..."
+                cf curl /v3/info
+                
+                echo "Targeting Org & Checking Domains..."
+                cf target -o $CF_ORG
+                cf domains
+

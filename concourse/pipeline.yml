@@ -1,0 +1,41 @@
+---
+resources:
+  - name: sample-app
+    type: git
+    icon: github
+    source:
+      uri: https://github.com/cloudfoundry-samples/cf-sample-app-nodejs.git
+      branch: master
+
+jobs:
+  - name: deploy-to-tas
+    plan:
+      - get: sample-app
+        trigger: false
+      - task: cf-push
+        config:
+          platform: linux
+          image_resource:
+            type: registry-image
+            source:
+              repository: governmentpaas/cf-cli
+              tag: latest
+          inputs:                  # <--- Declares the input folder to mount
+            - name: sample-app
+          params:
+            CF_API: https://api.sys.example.com
+            CF_ORG: sample-org
+            CF_SPACE: dev-space
+            CF_CLIENT_ID: ((cf_client_id))
+            CF_CLIENT_SECRET: ((cf_client_secret))
+          run:
+            path: sh
+            args:
+              - -exc
+              - |
+                cf api $CF_API --skip-ssl-validation
+                cf auth $CF_CLIENT_ID $CF_CLIENT_SECRET --client-credentials
+                cf target -o $CF_ORG -s $CF_SPACE
+                cd sample-app
+                cf push nodejs-demo-app -m 128M -k 256M --random-route
+                cf apps

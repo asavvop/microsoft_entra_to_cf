@@ -1,0 +1,41 @@
+version: 1
+kind: pipeline
+type: docker
+name: deploy-to-tas
+
+steps:
+  - name: cf-push-app
+    image: ubuntu:22.04
+    environment:
+      CF_API: https://api.sys.example.com
+      CF_ORG: sample-org
+      CF_SPACE: dev-space
+      CF_CLIENT_ID:
+        from_secret: cf_client_id
+      CF_CLIENT_SECRET:
+        from_secret: cf_client_secret
+    commands:
+      - echo "Installing dependencies and CF CLI..."
+      - apt-get update -qq && apt-get install -y -qq curl ca-certificates tar > /dev/null
+      - curl -sSL "https://packages.cloudfoundry.org/stable?release=linux64-binary&version=v8&source=github" | tar -zxvf - -C /usr/local/bin > /dev/null
+      
+      - echo "Targeting Cloud Foundry API..."
+      - cf api $CF_API --skip-ssl-validation
+      
+      - echo "Authenticating via OAuth2 Client Credentials..."
+      - cf auth $CF_CLIENT_ID $CF_CLIENT_SECRET --client-credentials
+      
+      - echo "Targeting Org and Space..."
+      - cf target -o $CF_ORG -s $CF_SPACE
+      
+      - echo "Creating a simple web app..."
+      - mkdir -p ./app
+      - echo "<h1>Hello from Harness CI/CD on Tanzu Platform!</h1><p>Authenticated via UAA Client Credentials without SAML.</p>" > ./app/index.html
+      - touch ./app/Staticfile
+      
+      - echo "Pushing staticfile application..."
+      - cd ./app
+      - cf push harness-demo-app -b staticfile_buildpack -m 64M -k 128M --random-route
+      
+      - echo "Deployment complete!"
+      - cf apps
